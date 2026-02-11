@@ -11,3 +11,4 @@ protobuf
 einops
 sentencepiece
 bitsandbytes
+huggingface_hub

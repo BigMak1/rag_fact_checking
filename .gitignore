@@ -1,0 +1,6 @@
+dataset/
+dataset.zip
+saved_models
+
+__pycache__/
+*.pyc

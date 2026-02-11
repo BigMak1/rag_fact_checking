@@ -20,8 +20,11 @@ from dataset_load import DatasetReader, UnifiedDataset, DATASET_CONFIGS
 os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
 
 # Model and training configurations
-ST_MODEL_NAME = 'nomic-ai/nomic-embed-text-v1.5'
+ST_MODEL_NAME = 'ai-forever/FRIDA'
+# ST_MODEL_NAME = 'nomic-ai/nomic-embed-text-v1.5'
 # ST_MODEL_NAME = 'Alibaba-NLP/gte-Qwen2-1.5B-instruct'
+DOC_EMBED_PROMPT = "search_document: "
+QUERY_EMBED_PROMPT = "search_query: "
 
 # ST_MODEL_NAME = 'Alibaba-NLP/gte-Qwen2-7B-instruct'
 # ST_MODEL_NAME = 'Alibaba-NLP/gte-Qwen2-1.5B-instruct'
@@ -33,8 +36,8 @@ ST_MODEL_NAME = 'nomic-ai/nomic-embed-text-v1.5'
 CLASSIFIER_MODEL_NAME = 'deberta'
 BATCH_SIZE = 8
 LEARNING_RATE = 5e-6
-EPOCH_SIZE = 1
-# EPOCH_SIZE = 5
+EPOCH_SIZE = 5
+# EPOCH_SIZE = 1
 # DATASET_NAME = 'LIAR-RAW'
 DATASET_NAME = 'RAWFC'
 USE_QUANTIZED_MODEL = False
@@ -73,7 +76,13 @@ class EvidenceClassificationPipeline:
 
         with TimingContext("retriever_initialization", self.timings):
             print(f"Loading retriever model: {retriever_model}")
-            self.retriever = EvidenceRetriever(retriever_model, USE_QUANTIZED_MODEL)
+            print(f"Retriever prompts: doc='{DOC_EMBED_PROMPT}' | query='{QUERY_EMBED_PROMPT}'")
+            self.retriever = EvidenceRetriever(
+                retriever_model,
+                USE_QUANTIZED_MODEL,
+                document_prompt=DOC_EMBED_PROMPT,
+                query_prompt=QUERY_EMBED_PROMPT,
+            )
 
         with TimingContext("classifier_initialization", self.timings):
             print(f"Loading classifier model: {classifier_model}")

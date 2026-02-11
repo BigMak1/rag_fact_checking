@@ -4,12 +4,21 @@ from sentence_transformers.models import Transformer, Pooling, Normalize
 from sentence_transformers import SentenceTransformer
 import faiss
 import torch
+import numpy as np
 TOP_K = 10
 
 class EvidenceRetriever:
-    def __init__(self, model_name: str, quantize: bool = False):
+    def __init__(
+        self,
+        model_name: str,
+        quantize: bool = False,
+        document_prompt: str = "",
+        query_prompt: str = "",
+    ):
         self.quantize = quantize
         self.timings = {}
+        self.document_prompt = (document_prompt or "").strip()
+        self.query_prompt = (query_prompt or "").strip()
 
         with TimingContext("model_initialization", self.timings):
             if self.quantize:
@@ -43,21 +52,28 @@ class EvidenceRetriever:
         self.index = None
         self.sentences = None
 
-    def _compute_embeddings(self, sentences):
+    def _format_texts(self, texts, prompt: str):
+        if not prompt:
+            return texts
+        return [f"{prompt}{text}" for text in texts]
+
+    def _compute_embeddings(self, sentences, prompt: str = ""):
         with TimingContext("embedding_computation", self.timings):
             embeddings = self.model.encode(
-                sentences,
+                self._format_texts(sentences, prompt),
                 show_progress_bar=True,
                 convert_to_tensor=False,
                 normalize_embeddings=True
             )
             if torch.is_tensor(embeddings):
                 embeddings = embeddings.cpu().numpy()
+            elif not isinstance(embeddings, np.ndarray):
+                embeddings = np.array(embeddings)
         return embeddings
 
     def build_index(self, sentences):
         self.sentences = sentences
-        embeddings = self._compute_embeddings(sentences)
+        embeddings = self._compute_embeddings(sentences, prompt=self.document_prompt)
         dimension = embeddings.shape[1]
 
         with TimingContext("faiss_index_building", self.timings):
@@ -66,7 +82,7 @@ class EvidenceRetriever:
 
     def retrieve_evidence(self, query: str, k: int = TOP_K):
         with TimingContext("evidence_retrieval", self.timings):
-            query_embedding = self._compute_embeddings([query])
+            query_embedding = self._compute_embeddings([query], prompt=self.query_prompt)
             distances, indices = self.index.search(
                 query_embedding.astype('float32'), k
             )
