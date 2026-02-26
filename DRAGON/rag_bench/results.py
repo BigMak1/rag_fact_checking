@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import uuid
@@ -7,6 +8,7 @@ import requests
 
 
 def save(data, path):
+    data = copy.deepcopy(data)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     json.dump(data, open(path, "w", encoding="utf8"), ensure_ascii=False, indent=4)
 

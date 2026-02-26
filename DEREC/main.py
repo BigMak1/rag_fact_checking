@@ -33,13 +33,13 @@ QUERY_EMBED_PROMPT = "search_query: "
 # ST_MODEL_NAME = "NovaSearch/stella_en_1.5B_v5"
 # ST_MODEL_NAME = 'Alibaba-NLP/gte-modernbert-base'
 
-CLASSIFIER_MODEL_NAME = 'deberta'
+CLASSIFIER_MODEL_NAME = 'ruDeberta'
 BATCH_SIZE = 8
 LEARNING_RATE = 5e-6
 EPOCH_SIZE = 5
 # EPOCH_SIZE = 1
 # DATASET_NAME = 'LIAR-RAW'
-DATASET_NAME = 'RAWFC'
+DATASET_NAME = 'DRAGON'
 USE_QUANTIZED_MODEL = False
 
 # Set random seeds
@@ -74,15 +74,19 @@ class EvidenceClassificationPipeline:
         print(f"Initializing pipeline for {dataset_name} dataset")
         print(f"Using device: {self.device}")
 
-        with TimingContext("retriever_initialization", self.timings):
-            print(f"Loading retriever model: {retriever_model}")
-            print(f"Retriever prompts: doc='{DOC_EMBED_PROMPT}' | query='{QUERY_EMBED_PROMPT}'")
-            self.retriever = EvidenceRetriever(
-                retriever_model,
-                USE_QUANTIZED_MODEL,
-                document_prompt=DOC_EMBED_PROMPT,
-                query_prompt=QUERY_EMBED_PROMPT,
-            )
+        if dataset_name != 'DRAGON':
+            with TimingContext("retriever_initialization", self.timings):
+                print(f"Loading retriever model: {retriever_model}")
+                print(f"Retriever prompts: doc='{DOC_EMBED_PROMPT}' | query='{QUERY_EMBED_PROMPT}'")
+                self.retriever = EvidenceRetriever(
+                    retriever_model,
+                    USE_QUANTIZED_MODEL,
+                    document_prompt=DOC_EMBED_PROMPT,
+                    query_prompt=QUERY_EMBED_PROMPT,
+                )
+        else:
+            print("DRAGON: skipping retriever (evidence pre-computed)")
+            self.retriever = None
 
         with TimingContext("classifier_initialization", self.timings):
             print(f"Loading classifier model: {classifier_model}")
@@ -115,6 +119,23 @@ class EvidenceClassificationPipeline:
                 num_labels=self.config['num_labels'],
             ).to(self.device)
             self.classifier.resize_token_embeddings(len(self.tokenizer))
+
+        elif classifier_model == 'ruDeberta':
+            model_name = "deepvk/deberta-v1-base"
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+            special_tokens = {'additional_special_tokens': ['[SEP]']}
+            self.tokenizer.add_special_tokens(special_tokens)
+            self.classifier = AutoModelForSequenceClassification.from_pretrained(
+                model_name,
+                num_labels=self.config['num_labels'],
+            ).to(self.device)
+            self.classifier.resize_token_embeddings(len(self.tokenizer))
+
+    def process_dragon_dataset(self, dataset):
+        claims = [item['claim'] for item in dataset]
+        evidences = [item['evidence'] for item in dataset]
+        labels = [item['label'] for item in dataset]
+        return claims, evidences, labels
 
     def process_raw_dataset(self, dataset, split: str = 'train'):
         
@@ -172,10 +193,14 @@ class EvidenceClassificationPipeline:
             self.best_metrics = None
 
             with TimingContext("data_processing", self.timings):
-                train_claims, train_evidences, train_labels = self.process_raw_dataset(
-                    train_dataset, 'train')
-                eval_claims, eval_evidences, eval_labels = self.process_raw_dataset(
-                    eval_dataset, 'eval')
+                if self.dataset_name == 'DRAGON':
+                    train_claims, train_evidences, train_labels = self.process_dragon_dataset(train_dataset)
+                    eval_claims, eval_evidences, eval_labels = self.process_dragon_dataset(eval_dataset)
+                else:
+                    train_claims, train_evidences, train_labels = self.process_raw_dataset(
+                        train_dataset, 'train')
+                    eval_claims, eval_evidences, eval_labels = self.process_raw_dataset(
+                        eval_dataset, 'eval')
 
                 train_data = UnifiedDataset(
                     train_claims, train_evidences, train_labels, self.dataset_name, self.tokenizer)
@@ -385,8 +410,11 @@ def main():
                 print("Continuing with current model state...")
         
         with TimingContext("final_evaluation", all_timings):
-            test_claims, test_evidences, test_labels = pipeline.process_raw_dataset(
-                test_data, 'test')
+            if dataset_name == 'DRAGON':
+                test_claims, test_evidences, test_labels = pipeline.process_dragon_dataset(test_data)
+            else:
+                test_claims, test_evidences, test_labels = pipeline.process_raw_dataset(
+                    test_data, 'test')
             test_dataset = UnifiedDataset(
                 test_claims, test_evidences, test_labels, dataset_name, pipeline.tokenizer)
             test_loader = DataLoader(

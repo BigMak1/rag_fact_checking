@@ -26,6 +26,11 @@ DATASET_CONFIGS = {
             "true": 2
         },
         'file_pattern': '{split}'
+    },
+    'DRAGON': {
+        'num_labels': 2,
+        'label_map': {False: 0, True: 1},  # ungrounded=0, grounded=1
+        'file_pattern': '{split}.json'
     }
 }
 
@@ -36,6 +41,8 @@ class DatasetReader:
             return DatasetReader._read_liar_raw(dataset_path, split)
         elif dataset_name == 'RAWFC':
             return DatasetReader._read_rawfc(dataset_path, split)
+        elif dataset_name == 'DRAGON':
+            return DatasetReader._read_dragon(dataset_path, split)
         else:
             raise ValueError(f"Unsupported dataset: {dataset_name}")
 
@@ -76,6 +83,30 @@ class DatasetReader:
             print(f"Error reading RAWFC directory {split_path}: {e}")
 
         return all_data
+
+    @staticmethod
+    def _read_dragon(base_path: str, split: str):
+        file_path = os.path.join(base_path, f"{split}.json")
+
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Dataset file not found: {file_path}")
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_data = json.load(f)
+
+        dataset = []
+        label_map = DATASET_CONFIGS['DRAGON']['label_map']
+        for record in raw_data:
+            claim = f"question: {record['question']}\nanswer: {record['model_answer']}"
+            evidence = "\n".join(record['evidence_texts'])
+            label = label_map[record['is_grounded']]
+            dataset.append({
+                'claim': claim,
+                'evidence': evidence,
+                'label': label,
+            })
+
+        return dataset
 
 class UnifiedDataset(Dataset):
     def __init__(self, claims, evidences, labels, dataset_name: str, tokenizer, max_length: int = 512):
