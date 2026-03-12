@@ -7,7 +7,7 @@ numpy
 tqdm
 torch>=2.1.0
 transformers
-vllm>=0.7.3
+vllm>=0.7.3,<0.15.0
 langchain_chroma<1.0
 rouge_score
 razdel
