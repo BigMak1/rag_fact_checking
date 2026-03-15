@@ -104,12 +104,18 @@ class DatasetReader:
                 'claim': claim,
                 'evidence': evidence,
                 'label': label,
+                'question': record['question'],
+                'answer': record['model_answer'],
+                'evidence_texts': record['evidence_texts'],
             })
 
         return dataset
 
 class UnifiedDataset(Dataset):
-    def __init__(self, claims, evidences, labels, dataset_name: str, tokenizer, max_length: int = 512):
+    def __init__(self, claims, evidences, labels, dataset_name: str, tokenizer,
+                 max_length: int = 512, input_format: str = "legacy",
+                 questions: list = None, answers: list = None,
+                 evidence_texts_list: list = None):
         self.claims = claims
         self.evidences = evidences
         self.labels = labels
@@ -118,12 +124,20 @@ class UnifiedDataset(Dataset):
         self.dataset_name = dataset_name
         self.config = DATASET_CONFIGS[dataset_name]
         self.label_map = self.config['label_map']
+        self.input_format = input_format
+        self.questions = questions
+        self.answers = answers
+        self.evidence_texts_list = evidence_texts_list
 
     def __len__(self):
         return len(self.claims)
 
     def __getitem__(self, idx):
-        if CLASSIFIER_MODEL_NAME == 'qwen':
+        if self.input_format == "sep_structured":
+            sep = self.tokenizer.sep_token
+            evidence_joined = f" {sep} ".join(self.evidence_texts_list[idx])
+            text = f"{self.questions[idx]} {sep} {self.answers[idx]} {sep} {evidence_joined}"
+        elif CLASSIFIER_MODEL_NAME == 'qwen':
             text = f"<|im_start|>claim: {self.claims[idx]} [SEP] evidence: {self.evidences[idx]}<|im_end|>"
         else:
             text = f"claim: {self.claims[idx]} [SEP] evidence: {self.evidences[idx]}"

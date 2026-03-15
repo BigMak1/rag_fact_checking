@@ -99,6 +99,9 @@ class EvidenceClassificationPipeline:
             print("DRAGON: skipping retriever (evidence pre-computed)")
             self.retriever = None
 
+        self.input_format = "legacy"
+        self.max_length = 512
+
         with TimingContext("classifier_initialization", self.timings):
             print(f"Loading classifier model: {classifier_model}")
             self._initialize_classifier(classifier_model)
@@ -134,11 +137,24 @@ class EvidenceClassificationPipeline:
             ).to(self.device)
             self.classifier.resize_token_embeddings(len(self.tokenizer))
 
+        elif classifier_model == "ruModernBert":
+            model_name = "deepvk/RuModernBERT-small"
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+            self.classifier = AutoModelForSequenceClassification.from_pretrained(
+                model_name,
+                num_labels=self.config["num_labels"],
+            ).to(self.device)
+            self.input_format = "sep_structured"
+            self.max_length = 2048
+
     def process_dragon_dataset(self, dataset):
         claims = [item["claim"] for item in dataset]
         evidences = [item["evidence"] for item in dataset]
         labels = [item["label"] for item in dataset]
-        return claims, evidences, labels
+        questions = [item.get("question") for item in dataset]
+        answers = [item.get("answer") for item in dataset]
+        evidence_texts_list = [item.get("evidence_texts", []) for item in dataset]
+        return claims, evidences, labels, questions, answers, evidence_texts_list
 
     def process_raw_dataset(self, dataset, split: str = "train"):
 
@@ -203,10 +219,10 @@ class EvidenceClassificationPipeline:
 
             with TimingContext("data_processing", self.timings):
                 if self.dataset_name == "DRAGON":
-                    train_claims, train_evidences, train_labels = (
+                    train_claims, train_evidences, train_labels, train_q, train_a, train_ev = (
                         self.process_dragon_dataset(train_dataset)
                     )
-                    eval_claims, eval_evidences, eval_labels = (
+                    eval_claims, eval_evidences, eval_labels, eval_q, eval_a, eval_ev = (
                         self.process_dragon_dataset(eval_dataset)
                     )
                 else:
@@ -216,6 +232,8 @@ class EvidenceClassificationPipeline:
                     eval_claims, eval_evidences, eval_labels = self.process_raw_dataset(
                         eval_dataset, "eval"
                     )
+                    train_q, train_a, train_ev = None, None, None
+                    eval_q, eval_a, eval_ev = None, None, None
 
                 train_data = UnifiedDataset(
                     train_claims,
@@ -223,6 +241,11 @@ class EvidenceClassificationPipeline:
                     train_labels,
                     self.dataset_name,
                     self.tokenizer,
+                    max_length=self.max_length,
+                    input_format=self.input_format,
+                    questions=train_q,
+                    answers=train_a,
+                    evidence_texts_list=train_ev,
                 )
                 eval_data = UnifiedDataset(
                     eval_claims,
@@ -230,6 +253,11 @@ class EvidenceClassificationPipeline:
                     eval_labels,
                     self.dataset_name,
                     self.tokenizer,
+                    max_length=self.max_length,
+                    input_format=self.input_format,
+                    questions=eval_q,
+                    answers=eval_a,
+                    evidence_texts_list=eval_ev,
                 )
 
                 g = torch.Generator()
@@ -457,19 +485,25 @@ def main():
 
         with TimingContext("final_evaluation", all_timings):
             if dataset_name == "DRAGON":
-                test_claims, test_evidences, test_labels = (
+                test_claims, test_evidences, test_labels, test_q, test_a, test_ev = (
                     pipeline.process_dragon_dataset(test_data)
                 )
             else:
                 test_claims, test_evidences, test_labels = pipeline.process_raw_dataset(
                     test_data, "test"
                 )
+                test_q, test_a, test_ev = None, None, None
             test_dataset = UnifiedDataset(
                 test_claims,
                 test_evidences,
                 test_labels,
                 dataset_name,
                 pipeline.tokenizer,
+                max_length=pipeline.max_length,
+                input_format=pipeline.input_format,
+                questions=test_q,
+                answers=test_a,
+                evidence_texts_list=test_ev,
             )
             test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
