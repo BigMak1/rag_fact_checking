@@ -4,23 +4,29 @@ from tqdm import tqdm
 import json
 import os
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoTokenizer,AutoConfig
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    AutoConfig,
+)
 import random
 import numpy as np
-import faiss
+
+# import faiss
 import time
 from datetime import datetime, timedelta
 import uuid
 
 # other modules
-from timetrack import TimingContext 
+from timetrack import TimingContext
 from retriever import EvidenceRetriever
 from dataset_load import DatasetReader, UnifiedDataset, DATASET_CONFIGS
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 # Model and training configurations
-ST_MODEL_NAME = 'ai-forever/FRIDA'
+ST_MODEL_NAME = "ai-forever/FRIDA"
 # ST_MODEL_NAME = 'nomic-ai/nomic-embed-text-v1.5'
 # ST_MODEL_NAME = 'Alibaba-NLP/gte-Qwen2-1.5B-instruct'
 DOC_EMBED_PROMPT = "search_document: "
@@ -33,13 +39,13 @@ QUERY_EMBED_PROMPT = "search_query: "
 # ST_MODEL_NAME = "NovaSearch/stella_en_1.5B_v5"
 # ST_MODEL_NAME = 'Alibaba-NLP/gte-modernbert-base'
 
-CLASSIFIER_MODEL_NAME = 'deberta'
+CLASSIFIER_MODEL_NAME = "ruDeberta"
 BATCH_SIZE = 8
 LEARNING_RATE = 5e-6
 EPOCH_SIZE = 5
 # EPOCH_SIZE = 1
 # DATASET_NAME = 'LIAR-RAW'
-DATASET_NAME = 'RAWFC'
+DATASET_NAME = "DRAGON"
 USE_QUANTIZED_MODEL = False
 
 # Set random seeds
@@ -52,84 +58,118 @@ torch.cuda.manual_seed_all(SEED)
 
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
-os.environ['PYTHONHASHSEED'] = str(SEED)
+os.environ["PYTHONHASHSEED"] = str(SEED)
 
 
 def generate_run_id():
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     random_id = str(uuid.uuid4())[:8]
     return f"{timestamp}_{random_id}"
 
 
-
 class EvidenceClassificationPipeline:
-    def __init__(self, dataset_name: str, retriever_model: str = ST_MODEL_NAME,
-                 classifier_model: str = CLASSIFIER_MODEL_NAME,
-                 device: str = None):
+    def __init__(
+        self,
+        dataset_name: str,
+        retriever_model: str = ST_MODEL_NAME,
+        classifier_model: str = CLASSIFIER_MODEL_NAME,
+        device: str = None,
+    ):
         self.dataset_name = dataset_name
         self.config = DATASET_CONFIGS[dataset_name]
-        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.timings = {}
 
         print(f"Initializing pipeline for {dataset_name} dataset")
         print(f"Using device: {self.device}")
 
-        with TimingContext("retriever_initialization", self.timings):
-            print(f"Loading retriever model: {retriever_model}")
-            print(f"Retriever prompts: doc='{DOC_EMBED_PROMPT}' | query='{QUERY_EMBED_PROMPT}'")
-            self.retriever = EvidenceRetriever(
-                retriever_model,
-                USE_QUANTIZED_MODEL,
-                document_prompt=DOC_EMBED_PROMPT,
-                query_prompt=QUERY_EMBED_PROMPT,
-            )
+        if dataset_name != "DRAGON":
+            with TimingContext("retriever_initialization", self.timings):
+                print(f"Loading retriever model: {retriever_model}")
+                print(
+                    f"Retriever prompts: doc='{DOC_EMBED_PROMPT}' | query='{QUERY_EMBED_PROMPT}'"
+                )
+                self.retriever = EvidenceRetriever(
+                    retriever_model,
+                    USE_QUANTIZED_MODEL,
+                    document_prompt=DOC_EMBED_PROMPT,
+                    query_prompt=QUERY_EMBED_PROMPT,
+                )
+        else:
+            print("DRAGON: skipping retriever (evidence pre-computed)")
+            self.retriever = None
+
+        self.input_format = "legacy"
+        self.max_length = 512
 
         with TimingContext("classifier_initialization", self.timings):
             print(f"Loading classifier model: {classifier_model}")
             self._initialize_classifier(classifier_model)
 
-        self.best_metrics = {
-            'accuracy': 0,
-            'precision': 0,
-            'recall': 0,
-            'f1': 0
-        }
+        self.best_metrics = {"accuracy": 0, "precision": 0, "recall": 0, "f1": 0}
         self.best_epoch = 0
 
     def _initialize_classifier(self, classifier_model):
-        model_kwargs = {
-            "trust_remote_code": True,
-            "device_map": "auto"
-        }
+        model_kwargs = {"trust_remote_code": True, "device_map": "auto"}
 
-        if classifier_model == 'deberta':
+        if classifier_model == "deberta":
             model_name = "microsoft/deberta-v3-base"
             # model_name = "microsoft/deberta-v3-large"
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                                       add_prefix_space=True,
-                                                       use_fast=True)
-            special_tokens = {'additional_special_tokens': ['[SEP]']}
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_name, add_prefix_space=True, use_fast=True
+            )
+            special_tokens = {"additional_special_tokens": ["[SEP]"]}
             self.tokenizer.add_special_tokens(special_tokens)
             self.classifier = AutoModelForSequenceClassification.from_pretrained(
                 model_name,
-                num_labels=self.config['num_labels'],
+                num_labels=self.config["num_labels"],
             ).to(self.device)
             self.classifier.resize_token_embeddings(len(self.tokenizer))
 
-    def process_raw_dataset(self, dataset, split: str = 'train'):
-        
+        elif classifier_model == "ruDeberta":
+            model_name = "deepvk/deberta-v1-base"
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+            special_tokens = {"additional_special_tokens": ["[SEP]"]}
+            self.tokenizer.add_special_tokens(special_tokens)
+            self.classifier = AutoModelForSequenceClassification.from_pretrained(
+                model_name,
+                num_labels=self.config["num_labels"],
+            ).to(self.device)
+            self.classifier.resize_token_embeddings(len(self.tokenizer))
+
+        elif classifier_model == "ruModernBert":
+            model_name = "deepvk/RuModernBERT-small"
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+            self.classifier = AutoModelForSequenceClassification.from_pretrained(
+                model_name,
+                num_labels=self.config["num_labels"],
+            ).to(self.device)
+            self.input_format = "sep_structured"
+            self.max_length = 2048
+
+    def process_dragon_dataset(self, dataset):
+        claims = [item["claim"] for item in dataset]
+        evidences = [item["evidence"] for item in dataset]
+        labels = [item["label"] for item in dataset]
+        questions = [item.get("question") for item in dataset]
+        answers = [item.get("answer") for item in dataset]
+        evidence_texts_list = [item.get("evidence_texts", []) for item in dataset]
+        return claims, evidences, labels, questions, answers, evidence_texts_list
+
+    def process_raw_dataset(self, dataset, split: str = "train"):
+
         with TimingContext(f"{split}_sentence_collection", self.timings):
             claims = []
             all_sentences = []
             labels = []
-            
+
             for item in tqdm(dataset):
-                if 'reports' in item:
-                    for report in item['reports']:
-                        if 'tokenized' in report:
-                            for sent_obj in report['tokenized']:
-                                if isinstance(sent_obj, dict) and 'sent' in sent_obj:
-                                    all_sentences.append(sent_obj['sent'])
+                if "reports" in item:
+                    for report in item["reports"]:
+                        if "tokenized" in report:
+                            for sent_obj in report["tokenized"]:
+                                if isinstance(sent_obj, dict) and "sent" in sent_obj:
+                                    all_sentences.append(sent_obj["sent"])
 
         with TimingContext(f"{split}_index_building", self.timings):
             print("Building FAISS index...")
@@ -141,18 +181,18 @@ class EvidenceClassificationPipeline:
                 if not isinstance(item, dict):
                     continue
 
-                claim = item.get('claim')
-                label = item.get('label')
+                claim = item.get("claim")
+                label = item.get("label")
 
                 if not claim or not label:
                     continue
 
                 claims.append(claim)
-                label = self.config['label_map'][item['label'].lower()]
+                label = self.config["label_map"][item["label"].lower()]
                 labels.append(label)
 
                 evidence = self.retriever.retrieve_evidence(claim, k=10)
-                evidence_text = ' '.join([e[2] for e in evidence])
+                evidence_text = " ".join([e[2] for e in evidence])
                 evidence_texts.append(evidence_text)
 
         for key, value in self.retriever.timings.items():
@@ -160,10 +200,16 @@ class EvidenceClassificationPipeline:
 
         return claims, evidence_texts, labels
 
-    def train(self, train_dataset, eval_dataset,
-              batch_size: int = BATCH_SIZE, num_epochs: int = EPOCH_SIZE,
-              learning_rate: float = LEARNING_RATE, save_dir: str = None):
-        
+    def train(
+        self,
+        train_dataset,
+        eval_dataset,
+        batch_size: int = BATCH_SIZE,
+        num_epochs: int = EPOCH_SIZE,
+        learning_rate: float = LEARNING_RATE,
+        save_dir: str = None,
+    ):
+
         with TimingContext("total_training_time", self.timings):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -172,55 +218,82 @@ class EvidenceClassificationPipeline:
             self.best_metrics = None
 
             with TimingContext("data_processing", self.timings):
-                train_claims, train_evidences, train_labels = self.process_raw_dataset(
-                    train_dataset, 'train')
-                eval_claims, eval_evidences, eval_labels = self.process_raw_dataset(
-                    eval_dataset, 'eval')
+                if self.dataset_name == "DRAGON":
+                    train_claims, train_evidences, train_labels, train_q, train_a, train_ev = (
+                        self.process_dragon_dataset(train_dataset)
+                    )
+                    eval_claims, eval_evidences, eval_labels, eval_q, eval_a, eval_ev = (
+                        self.process_dragon_dataset(eval_dataset)
+                    )
+                else:
+                    train_claims, train_evidences, train_labels = (
+                        self.process_raw_dataset(train_dataset, "train")
+                    )
+                    eval_claims, eval_evidences, eval_labels = self.process_raw_dataset(
+                        eval_dataset, "eval"
+                    )
+                    train_q, train_a, train_ev = None, None, None
+                    eval_q, eval_a, eval_ev = None, None, None
 
                 train_data = UnifiedDataset(
-                    train_claims, train_evidences, train_labels, self.dataset_name, self.tokenizer)
+                    train_claims,
+                    train_evidences,
+                    train_labels,
+                    self.dataset_name,
+                    self.tokenizer,
+                    max_length=self.max_length,
+                    input_format=self.input_format,
+                    questions=train_q,
+                    answers=train_a,
+                    evidence_texts_list=train_ev,
+                )
                 eval_data = UnifiedDataset(
-                    eval_claims, eval_evidences, eval_labels, self.dataset_name, self.tokenizer)
+                    eval_claims,
+                    eval_evidences,
+                    eval_labels,
+                    self.dataset_name,
+                    self.tokenizer,
+                    max_length=self.max_length,
+                    input_format=self.input_format,
+                    questions=eval_q,
+                    answers=eval_a,
+                    evidence_texts_list=eval_ev,
+                )
 
                 g = torch.Generator()
                 g.manual_seed(SEED)
                 train_loader = DataLoader(
-                    train_data,
-                    batch_size=batch_size,
-                    shuffle=True,
-                    generator=g
+                    train_data, batch_size=batch_size, shuffle=True, generator=g
                 )
 
                 eval_loader = DataLoader(
-                    eval_data,
-                    batch_size=batch_size,
-                    shuffle=False,
-                    generator=g
+                    eval_data, batch_size=batch_size, shuffle=False, generator=g
                 )
 
             optimizer = torch.optim.AdamW(
-                self.classifier.parameters(), lr=learning_rate)
+                self.classifier.parameters(), lr=learning_rate
+            )
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer,
-                T_max=len(train_loader) * num_epochs
+                optimizer, T_max=len(train_loader) * num_epochs
             )
 
             # Training loop
             self.best_f1 = 0
             epoch_timings = {}
-            
+
             for epoch in range(num_epochs):
                 epoch_start_time = time.time()
-                
+
                 # Training phase
-                with TimingContext(f"epoch_{epoch+1}_training", epoch_timings):
+                with TimingContext(f"epoch_{epoch + 1}_training", epoch_timings):
                     self.classifier.train()
                     total_loss = 0
                     train_predictions = []
                     train_labels = []
 
                     progress_bar = tqdm(
-                        train_loader, desc=f'Epoch {epoch + 1}/{num_epochs}')
+                        train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}"
+                    )
                     for batch in progress_bar:
                         optimizer.zero_grad()
                         inputs = {k: v.to(self.device) for k, v in batch.items()}
@@ -229,7 +302,7 @@ class EvidenceClassificationPipeline:
 
                         preds = torch.argmax(outputs.logits, dim=1)
                         train_predictions.extend(preds.cpu().numpy())
-                        train_labels.extend(inputs['labels'].cpu().numpy())
+                        train_labels.extend(inputs["labels"].cpu().numpy())
 
                         loss.backward()
                         optimizer.step()
@@ -237,15 +310,22 @@ class EvidenceClassificationPipeline:
 
                         total_loss += loss.item()
                         progress_bar.set_postfix(
-                            {'loss': f'{total_loss / (progress_bar.n + 1):.4f}'})
+                            {"loss": f"{total_loss / (progress_bar.n + 1):.4f}"}
+                        )
 
                 # Calculate training metrics
-                with TimingContext(f"epoch_{epoch+1}_metrics", epoch_timings):
+                with TimingContext(f"epoch_{epoch + 1}_metrics", epoch_timings):
                     train_metrics = {
-                        'accuracy': accuracy_score(train_labels, train_predictions),
-                        'precision': precision_score(train_labels, train_predictions, average='macro'),
-                        'recall': recall_score(train_labels, train_predictions, average='macro'),
-                        'f1': f1_score(train_labels, train_predictions, average='macro')
+                        "accuracy": accuracy_score(train_labels, train_predictions),
+                        "precision": precision_score(
+                            train_labels, train_predictions, average="macro"
+                        ),
+                        "recall": recall_score(
+                            train_labels, train_predictions, average="macro"
+                        ),
+                        "f1": f1_score(
+                            train_labels, train_predictions, average="macro"
+                        ),
                     }
 
                     print(f"\nEpoch {epoch + 1} Training Metrics:")
@@ -253,27 +333,31 @@ class EvidenceClassificationPipeline:
                         print(f"{key}: {value:.4f}")
 
                 # Validation phase
-                with TimingContext(f"epoch_{epoch+1}_validation", epoch_timings):
+                with TimingContext(f"epoch_{epoch + 1}_validation", epoch_timings):
                     val_metrics = self.evaluate(eval_loader)
                     print(f"\nEpoch {epoch + 1} Validation Metrics:")
                     for key, value in val_metrics.items():
                         print(f"{key}: {value:.4f}")
 
                 # Save best model
-                if val_metrics['f1'] > self.best_f1:
-                    self.best_f1 = val_metrics['f1']
+                if val_metrics["f1"] > self.best_f1:
+                    self.best_f1 = val_metrics["f1"]
                     self.best_epoch = epoch + 1
                     self.best_metrics = val_metrics.copy()
 
                     if save_dir:
-                        with TimingContext(f"epoch_{epoch+1}_model_saving", epoch_timings):
+                        with TimingContext(
+                            f"epoch_{epoch + 1}_model_saving", epoch_timings
+                        ):
                             os.makedirs(save_dir, exist_ok=True)
-                            model_path = os.path.join(save_dir, f'epoch_{epoch + 1}')
+                            model_path = os.path.join(save_dir, f"epoch_{epoch + 1}")
                             self.classifier.save_pretrained(model_path)
                             self.tokenizer.save_pretrained(model_path)
 
                 epoch_time = time.time() - epoch_start_time
-                print(f"\nEpoch {epoch + 1} completed in: {str(timedelta(seconds=int(epoch_time)))}")
+                print(
+                    f"\nEpoch {epoch + 1} completed in: {str(timedelta(seconds=int(epoch_time)))}"
+                )
 
             self.timings.update(epoch_timings)
 
@@ -293,59 +377,68 @@ class EvidenceClassificationPipeline:
                 preds = torch.argmax(outputs.logits, dim=1)
 
                 all_preds.extend(preds.cpu().numpy())
-                all_labels.extend(inputs['labels'].cpu().numpy())
+                all_labels.extend(inputs["labels"].cpu().numpy())
 
         return self._calculate_metrics(all_labels, all_preds)
 
     def _calculate_metrics(self, labels, predictions):
         return {
-            'accuracy': accuracy_score(labels, predictions),
-            'precision': precision_score(labels, predictions, average='macro'),
-            'recall': recall_score(labels, predictions, average='macro'),
-            'f1': f1_score(labels, predictions, average='macro')
+            "accuracy": accuracy_score(labels, predictions),
+            "precision": precision_score(labels, predictions, average="macro"),
+            "recall": recall_score(labels, predictions, average="macro"),
+            "f1": f1_score(labels, predictions, average="macro"),
         }
 
     def _print_metrics(self, metrics):
         for key, value in metrics.items():
             print(f"{key}: {value:.4f}")
 
+
 def main():
     # Generate a unique run ID for this training session
     run_id = generate_run_id()
     print(f"\nStarting new training run with ID: {run_id}")
-    
+
     all_timings = {}
     with TimingContext("total_execution", all_timings):
         start_datetime = datetime.now()
-        print(f"\nStarting execution at: {start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
-        
+        print(
+            f"\nStarting execution at: {start_datetime.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
         dataset_name = DATASET_NAME
         if dataset_name not in DATASET_CONFIGS:
-            raise ValueError(f"Unsupported dataset: {dataset_name}. Must be one of {list(DATASET_CONFIGS.keys())}")
+            raise ValueError(
+                f"Unsupported dataset: {dataset_name}. Must be one of {list(DATASET_CONFIGS.keys())}"
+            )
 
         # Set paths with run_id included
         BASE_DIR = os.getcwd()
         dataset_path = os.path.join(BASE_DIR, "dataset", dataset_name)
-        
+
         save_dir = os.path.join(
-            BASE_DIR, 
-            f"saved_models/{dataset_name.lower()}_classifier/run_{run_id}"
+            BASE_DIR, f"saved_models/{dataset_name.lower()}_classifier/run_{run_id}"
         )
         os.makedirs(save_dir, exist_ok=True)
 
         with TimingContext("data_loading", all_timings):
             try:
                 print("Loading training data...")
-                train_data = DatasetReader.read_dataset(dataset_name, dataset_path, "train")
-                
-                eval_data = DatasetReader.read_dataset(dataset_name, dataset_path, "val")
-                
-                test_data = DatasetReader.read_dataset(dataset_name, dataset_path, "test")
-                
+                train_data = DatasetReader.read_dataset(
+                    dataset_name, dataset_path, "train"
+                )
+
+                eval_data = DatasetReader.read_dataset(
+                    dataset_name, dataset_path, "val"
+                )
+
+                test_data = DatasetReader.read_dataset(
+                    dataset_name, dataset_path, "test"
+                )
+
             except Exception as e:
                 print(f"Error loading datasets: {str(e)}")
                 raise
-
 
         with TimingContext("pipeline_initialization", all_timings):
             pipeline = EvidenceClassificationPipeline(dataset_name)
@@ -357,55 +450,77 @@ def main():
                 batch_size=BATCH_SIZE,
                 num_epochs=EPOCH_SIZE,
                 learning_rate=LEARNING_RATE,
-                save_dir=save_dir
+                save_dir=save_dir,
             )
             # Add pipeline timings to overall timings
             all_timings.update(pipeline.timings)
 
         # Final evaluation on test set
-        best_model_path = os.path.join(save_dir, f'epoch_{pipeline.best_epoch}')
-        
+        best_model_path = os.path.join(save_dir, f"epoch_{pipeline.best_epoch}")
+
         with TimingContext("model_loading", all_timings):
             try:
                 if not os.path.exists(best_model_path):
-                    raise FileNotFoundError(f"Best model directory not found: {best_model_path}")
-                
-                config = AutoConfig.from_pretrained(best_model_path, local_files_only=True)
-                pipeline.classifier = AutoModelForSequenceClassification.from_pretrained(
-                    best_model_path,
-                    config=config,
-                    local_files_only=True,
-                    trust_remote_code=True
-                ).to(pipeline.device)
-                
+                    raise FileNotFoundError(
+                        f"Best model directory not found: {best_model_path}"
+                    )
+
+                config = AutoConfig.from_pretrained(
+                    best_model_path, local_files_only=True
+                )
+                pipeline.classifier = (
+                    AutoModelForSequenceClassification.from_pretrained(
+                        best_model_path,
+                        config=config,
+                        local_files_only=True,
+                        trust_remote_code=True,
+                    ).to(pipeline.device)
+                )
+
                 print(f"Successfully loaded best model from {best_model_path}")
-                
+
             except Exception as e:
                 print(f"Error loading best model: {str(e)}")
                 print("Continuing with current model state...")
-        
+
         with TimingContext("final_evaluation", all_timings):
-            test_claims, test_evidences, test_labels = pipeline.process_raw_dataset(
-                test_data, 'test')
+            if dataset_name == "DRAGON":
+                test_claims, test_evidences, test_labels, test_q, test_a, test_ev = (
+                    pipeline.process_dragon_dataset(test_data)
+                )
+            else:
+                test_claims, test_evidences, test_labels = pipeline.process_raw_dataset(
+                    test_data, "test"
+                )
+                test_q, test_a, test_ev = None, None, None
             test_dataset = UnifiedDataset(
-                test_claims, test_evidences, test_labels, dataset_name, pipeline.tokenizer)
-            test_loader = DataLoader(
-                test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+                test_claims,
+                test_evidences,
+                test_labels,
+                dataset_name,
+                pipeline.tokenizer,
+                max_length=pipeline.max_length,
+                input_format=pipeline.input_format,
+                questions=test_q,
+                answers=test_a,
+                evidence_texts_list=test_ev,
+            )
+            test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
             test_metrics = pipeline.evaluate(test_loader)
 
         # Save final results with timings
         results = {
-            'run_id': run_id,
-            'best_epoch': pipeline.best_epoch,
-            'test_metrics': test_metrics,
-            'training_complete': True,
-            'completion_time': datetime.now().isoformat(),
-            'timings': all_timings
+            "run_id": run_id,
+            "best_epoch": pipeline.best_epoch,
+            "test_metrics": test_metrics,
+            "training_complete": True,
+            "completion_time": datetime.now().isoformat(),
+            "timings": all_timings,
         }
-        
-        results_path = os.path.join(save_dir, 'final_results.json')
-        with open(results_path, 'w') as f:
+
+        results_path = os.path.join(save_dir, "final_results.json")
+        with open(results_path, "w") as f:
             json.dump(results, f, indent=2)
 
         # Print final results and timings
@@ -437,6 +552,7 @@ def main():
         print(f"\nExecution started at: {start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Execution completed at: {end_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Total duration: {str(timedelta(seconds=int(duration)))}")
+
 
 if __name__ == "__main__":
     main()

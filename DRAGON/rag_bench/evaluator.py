@@ -1,4 +1,5 @@
 import ast
+import copy
 import re
 from types import SimpleNamespace
 from typing import Any, Dict
@@ -166,6 +167,8 @@ def check_doc_ids(doc_ids) -> bool:
 
 
 def evaluate_rag_results(results, dataset, text_mapping):
+    results = copy.deepcopy(results)
+    text_mapping = copy.deepcopy(text_mapping)
     evaluation_results = dict()
     evaluator = RAGEvaluator()
     question_types = sorted(list(set(dataset["train"]["type"])))

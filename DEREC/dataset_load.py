@@ -26,6 +26,11 @@ DATASET_CONFIGS = {
             "true": 2
         },
         'file_pattern': '{split}'
+    },
+    'DRAGON': {
+        'num_labels': 2,
+        'label_map': {False: 0, True: 1},  # ungrounded=0, grounded=1
+        'file_pattern': '{split}.json'
     }
 }
 
@@ -36,6 +41,8 @@ class DatasetReader:
             return DatasetReader._read_liar_raw(dataset_path, split)
         elif dataset_name == 'RAWFC':
             return DatasetReader._read_rawfc(dataset_path, split)
+        elif dataset_name == 'DRAGON':
+            return DatasetReader._read_dragon(dataset_path, split)
         else:
             raise ValueError(f"Unsupported dataset: {dataset_name}")
 
@@ -77,8 +84,38 @@ class DatasetReader:
 
         return all_data
 
+    @staticmethod
+    def _read_dragon(base_path: str, split: str):
+        file_path = os.path.join(base_path, f"{split}.json")
+
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Dataset file not found: {file_path}")
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_data = json.load(f)
+
+        dataset = []
+        label_map = DATASET_CONFIGS['DRAGON']['label_map']
+        for record in raw_data:
+            claim = f"question: {record['question']}\nanswer: {record['model_answer']}"
+            evidence = "\n".join(record['evidence_texts'])
+            label = label_map[record['is_grounded']]
+            dataset.append({
+                'claim': claim,
+                'evidence': evidence,
+                'label': label,
+                'question': record['question'],
+                'answer': record['model_answer'],
+                'evidence_texts': record['evidence_texts'],
+            })
+
+        return dataset
+
 class UnifiedDataset(Dataset):
-    def __init__(self, claims, evidences, labels, dataset_name: str, tokenizer, max_length: int = 512):
+    def __init__(self, claims, evidences, labels, dataset_name: str, tokenizer,
+                 max_length: int = 512, input_format: str = "legacy",
+                 questions: list = None, answers: list = None,
+                 evidence_texts_list: list = None):
         self.claims = claims
         self.evidences = evidences
         self.labels = labels
@@ -87,12 +124,20 @@ class UnifiedDataset(Dataset):
         self.dataset_name = dataset_name
         self.config = DATASET_CONFIGS[dataset_name]
         self.label_map = self.config['label_map']
+        self.input_format = input_format
+        self.questions = questions
+        self.answers = answers
+        self.evidence_texts_list = evidence_texts_list
 
     def __len__(self):
         return len(self.claims)
 
     def __getitem__(self, idx):
-        if CLASSIFIER_MODEL_NAME == 'qwen':
+        if self.input_format == "sep_structured":
+            sep = self.tokenizer.sep_token
+            evidence_joined = f" {sep} ".join(self.evidence_texts_list[idx])
+            text = f"{self.questions[idx]} {sep} {self.answers[idx]} {sep} {evidence_joined}"
+        elif CLASSIFIER_MODEL_NAME == 'qwen':
             text = f"<|im_start|>claim: {self.claims[idx]} [SEP] evidence: {self.evidences[idx]}<|im_end|>"
         else:
             text = f"claim: {self.claims[idx]} [SEP] evidence: {self.evidences[idx]}"
